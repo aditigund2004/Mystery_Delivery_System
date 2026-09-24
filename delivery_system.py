@@ -1,6 +1,5 @@
 """
 FastBox Mystery Delivery System
-================================
 
 A logistics simulator for a fictional delivery company, FastBox.
 
@@ -20,13 +19,11 @@ Given a set of warehouses, delivery agents, and packages, this module:
   5. Saves the report as report.json.
 
 Run directly for a demo against data.json:
-    python3 delivery_system.py
+    python delivery_system.py
 
 Or point it at any other input file:
-    python3 delivery_system.py --input data/test_case_3.json --output report_3.json
+    python delivery_system.py --input data/test_case_3.json --output report_3.json
 
-See README.md for the bonus features (delays, ASCII route map, a new
-agent joining mid-day, CSV export of the top performer).
 """
 
 from __future__ import annotations
@@ -40,8 +37,6 @@ from typing import Dict, List, Tuple, Optional
 
 Point = Tuple[float, float]
 
-
-# ---------------------------------------------------------------------------
 # 1. Parsing
 # ---------------------------------------------------------------------------
 
@@ -55,7 +50,7 @@ def load_data(path: str) -> dict:
           "packages":   [{"id": "P1", "warehouse": "W1", "destination": [x, y]}, ...]
         }
     """
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8-sig") as f:
         raw_text = f.read()
     data = json.loads(raw_text)  # manual parse of the JSON text
 
@@ -67,7 +62,6 @@ def load_data(path: str) -> dict:
     return data
 
 
-# ---------------------------------------------------------------------------
 # 2. Distance calculation
 # ---------------------------------------------------------------------------
 
@@ -76,42 +70,97 @@ def euclidean_distance(p1: Point, p2: Point) -> float:
     return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
 
-# ---------------------------------------------------------------------------
 # 3. Assignment: nearest agent (by distance to the package's warehouse)
 # ---------------------------------------------------------------------------
+
+
+class InvalidPackageError(ValueError):
+    """Raised when a package can't be assigned (bad/missing warehouse,
+    missing fields, etc). Carries the offending package for reporting."""
+
+    def __init__(self, message: str, package: dict):
+        super().__init__(message)
+        self.package = package
+
+
+# def assign_packages(
+#     warehouses: Dict[str, Point],
+#     agents: Dict[str, Point],
+#     packages: List[dict],
+# ) -> Dict[str, List[dict]]:
+#     """Assign every package to the agent nearest to its warehouse.
+
+#     "Nearest" is measured once, from each agent's starting position to
+#     the package's warehouse -- this mirrors the spec exactly ("Assign
+#     each package to the nearest agent based on Euclidean distance from
+#     agent to warehouse"). Packages keep the order they were given in,
+#     which matters later for simulating each agent's route.
+#     """
+#     assignments: Dict[str, List[dict]] = {agent_id: [] for agent_id in agents}
+
+#     for package in packages:
+#         warehouse_id = package["warehouse"]
+#         if warehouse_id not in warehouses:
+#             raise ValueError(f"Package {package['id']} references unknown warehouse '{warehouse_id}'")
+#         warehouse_pos = warehouses[warehouse_id]
+
+#         # Find the agent whose starting position is closest to this warehouse.
+#         nearest_agent = min(
+#             agents,
+#             key=lambda agent_id: euclidean_distance(agents[agent_id], warehouse_pos),
+#         )
+#         assignments[nearest_agent].append(package)
+
+#     return assignments
+
+
+# ------------- new code accepted
 
 def assign_packages(
     warehouses: Dict[str, Point],
     agents: Dict[str, Point],
     packages: List[dict],
-) -> Dict[str, List[dict]]:
-    """Assign every package to the agent nearest to its warehouse.
-
-    "Nearest" is measured once, from each agent's starting position to
-    the package's warehouse -- this mirrors the spec exactly ("Assign
-    each package to the nearest agent based on Euclidean distance from
-    agent to warehouse"). Packages keep the order they were given in,
-    which matters later for simulating each agent's route.
-    """
+    skip_invalid: bool = False,
+) -> Tuple[Dict[str, List[dict]], List[dict]]:
     assignments: Dict[str, List[dict]] = {agent_id: [] for agent_id in agents}
+    skipped: List[dict] = []
 
     for package in packages:
-        warehouse_id = package["warehouse"]
-        if warehouse_id not in warehouses:
-            raise ValueError(f"Package {package['id']} references unknown warehouse '{warehouse_id}'")
-        warehouse_pos = warehouses[warehouse_id]
+        try:
+            if "warehouse" not in package or "destination" not in package or "id" not in package:
+                raise InvalidPackageError(
+                    f"Package {package.get('id', '<no id>')} is missing a required field "
+                    f"(needs id, warehouse, destination): {package}",
+                    package,
+                )
+            warehouse_id = package["warehouse"]
+            if warehouse_id not in warehouses:
+                raise InvalidPackageError(
+                    f"Package {package['id']} references unknown warehouse '{warehouse_id}'",
+                    package,
+                )
+            if not agents:
+                raise InvalidPackageError(
+                    f"Package {package['id']} can't be assigned: there are no agents at all",
+                    package,
+                )
+            warehouse_pos = warehouses[warehouse_id]
+            nearest_agent = min(
+                agents,
+                key=lambda agent_id: euclidean_distance(agents[agent_id], warehouse_pos),
+            )
+            assignments[nearest_agent].append(package)
 
-        # Find the agent whose starting position is closest to this warehouse.
-        nearest_agent = min(
-            agents,
-            key=lambda agent_id: euclidean_distance(agents[agent_id], warehouse_pos),
-        )
-        assignments[nearest_agent].append(package)
+        except InvalidPackageError as exc:
+            if skip_invalid:
+                skipped.append(package)
+                print(f"[WARNING] Skipping invalid package: {exc}")
+            else:
+                raise
 
-    return assignments
+    return assignments, skipped
 
 
-# ---------------------------------------------------------------------------
 # 4. Simulation: agent travels its route for the day
 # ---------------------------------------------------------------------------
 
@@ -186,7 +235,50 @@ def simulate_deliveries(
 # 5. Report generation
 # ---------------------------------------------------------------------------
 
-def generate_report(sim_results: Dict[str, dict], total_package_count: int) -> dict:
+# def generate_report(sim_results: Dict[str, dict], total_package_count: int) -> dict:
+#     """Build the final report dict, matching the format requested in the
+#     assignment, plus a couple of useful extras (delivered_ids, sanity check).
+
+#     efficiency = total_distance / packages_delivered (lower = better),
+#     so the best agent is the one with the *lowest* efficiency among
+#     agents who actually delivered at least one package.
+#     """
+#     report: dict = {}
+#     delivered_total = 0
+
+#     for agent_id, stats in sim_results.items():
+#         entry = {
+#             "packages_delivered": stats["packages_delivered"],
+#             "total_distance": stats["total_distance"],
+#             "efficiency": stats["efficiency"],
+#         }
+#         if "total_delay_minutes" in stats:
+#             entry["total_delay_minutes"] = stats["total_delay_minutes"]
+#             entry["delayed_packages"] = stats["delayed_packages"]
+#         report[agent_id] = entry
+#         delivered_total += stats["packages_delivered"]
+
+#     active_agents = {a: s for a, s in sim_results.items() if s["packages_delivered"] > 0}
+#     best_agent = min(active_agents, key=lambda a: active_agents[a]["efficiency"]) if active_agents else None
+#     report["best_agent"] = best_agent
+
+#     # Sanity check called out explicitly in the assignment notes.
+#     if delivered_total != total_package_count:
+#         report["_warning"] = (
+#             f"Delivered count ({delivered_total}) does not match "
+#             f"total packages ({total_package_count})"
+#         )
+
+#     return report
+
+
+# ------------ new accpted code
+
+def generate_report(
+    sim_results: Dict[str, dict],
+    total_package_count: int,
+    skipped_packages: Optional[List[dict]] = None,
+) -> dict:
     """Build the final report dict, matching the format requested in the
     assignment, plus a couple of useful extras (delivered_ids, sanity check).
 
@@ -194,6 +286,7 @@ def generate_report(sim_results: Dict[str, dict], total_package_count: int) -> d
     so the best agent is the one with the *lowest* efficiency among
     agents who actually delivered at least one package.
     """
+    skipped_packages = skipped_packages or []
     report: dict = {}
     delivered_total = 0
 
@@ -213,15 +306,17 @@ def generate_report(sim_results: Dict[str, dict], total_package_count: int) -> d
     best_agent = min(active_agents, key=lambda a: active_agents[a]["efficiency"]) if active_agents else None
     report["best_agent"] = best_agent
 
-    # Sanity check called out explicitly in the assignment notes.
-    if delivered_total != total_package_count:
+    if skipped_packages:
+        report["skipped_packages"] = [p.get("id", "<no id>") for p in skipped_packages]
+
+    accounted_for = delivered_total + len(skipped_packages)
+    if accounted_for != total_package_count:
         report["_warning"] = (
-            f"Delivered count ({delivered_total}) does not match "
-            f"total packages ({total_package_count})"
+            f"Delivered count ({delivered_total}) + skipped ({len(skipped_packages)}) "
+            f"does not match total packages ({total_package_count})"
         )
 
     return report
-
 
 def save_report(report: dict, path: str) -> None:
     """Write the report to disk as pretty-printed JSON."""
@@ -234,6 +329,52 @@ def save_report(report: dict, path: str) -> None:
 # Bonus: a new agent joining mid-day
 # ---------------------------------------------------------------------------
 
+# def run_with_midday_agent(
+#     warehouses: Dict[str, Point],
+#     agents: Dict[str, Point],
+#     packages: List[dict],
+#     new_agent_id: str,
+#     new_agent_pos: Point,
+#     join_after_package_index: int,
+#     delay_probability: float = 0.0,
+#     max_delay_minutes: float = 0.0,
+#     rng: Optional[random.Random] = None,
+# ) -> Dict[str, dict]:
+#     """Simulate a day where `new_agent_id` becomes available partway
+#     through, i.e. after the first `join_after_package_index` packages
+#     have already been assigned to the original roster.
+
+#     Packages before the split are assigned among the original agents;
+#     packages from the split onward are assigned among the original
+#     agents *plus* the new one.
+#     """
+#     early_packages = packages[:join_after_package_index]
+#     late_packages = packages[join_after_package_index:]
+
+#     early_assignments = assign_packages(warehouses, agents, early_packages)
+
+#     agents_with_new = dict(agents)
+#     agents_with_new[new_agent_id] = new_agent_pos
+#     late_assignments = assign_packages(warehouses, agents_with_new, late_packages)
+
+#     # Merge the two assignment rounds (order preserved within each round).
+#     combined: Dict[str, List[dict]] = {a: [] for a in agents_with_new}
+#     for agent_id, pkgs in early_assignments.items():
+#         combined[agent_id].extend(pkgs)
+#     for agent_id, pkgs in late_assignments.items():
+#         combined[agent_id].extend(pkgs)
+
+#     return simulate_deliveries(
+#         warehouses, agents_with_new, combined,
+#         delay_probability=delay_probability,
+#         max_delay_minutes=max_delay_minutes,
+#         rng=rng,
+#     )
+
+
+
+#  ---- new accepted code
+
 def run_with_midday_agent(
     warehouses: Dict[str, Point],
     agents: Dict[str, Point],
@@ -243,8 +384,9 @@ def run_with_midday_agent(
     join_after_package_index: int,
     delay_probability: float = 0.0,
     max_delay_minutes: float = 0.0,
+    skip_invalid: bool = False,
     rng: Optional[random.Random] = None,
-) -> Dict[str, dict]:
+) -> Tuple[Dict[str, dict], List[dict]]:
     """Simulate a day where `new_agent_id` becomes available partway
     through, i.e. after the first `join_after_package_index` packages
     have already been assigned to the original roster.
@@ -252,15 +394,21 @@ def run_with_midday_agent(
     Packages before the split are assigned among the original agents;
     packages from the split onward are assigned among the original
     agents *plus* the new one.
+
+    Returns (sim_results, skipped_packages).
     """
     early_packages = packages[:join_after_package_index]
     late_packages = packages[join_after_package_index:]
 
-    early_assignments = assign_packages(warehouses, agents, early_packages)
+    early_assignments, early_skipped = assign_packages(
+        warehouses, agents, early_packages, skip_invalid=skip_invalid
+    )
 
     agents_with_new = dict(agents)
     agents_with_new[new_agent_id] = new_agent_pos
-    late_assignments = assign_packages(warehouses, agents_with_new, late_packages)
+    late_assignments, late_skipped = assign_packages(
+        warehouses, agents_with_new, late_packages, skip_invalid=skip_invalid
+    )
 
     # Merge the two assignment rounds (order preserved within each round).
     combined: Dict[str, List[dict]] = {a: [] for a in agents_with_new}
@@ -269,12 +417,13 @@ def run_with_midday_agent(
     for agent_id, pkgs in late_assignments.items():
         combined[agent_id].extend(pkgs)
 
-    return simulate_deliveries(
+    sim_results = simulate_deliveries(
         warehouses, agents_with_new, combined,
         delay_probability=delay_probability,
         max_delay_minutes=max_delay_minutes,
         rng=rng,
     )
+    return sim_results, early_skipped + late_skipped
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +523,62 @@ def export_top_performer_csv(report: dict, path: str) -> Optional[str]:
 # Orchestration
 # ---------------------------------------------------------------------------
 
+# def run(
+#     input_path: str,
+#     output_path: str = "report.json",
+#     show_ascii: bool = False,
+#     delay_probability: float = 0.0,
+#     max_delay_minutes: float = 30.0,
+#     new_agent: Optional[str] = None,
+#     export_csv: Optional[str] = None,
+#     seed: Optional[int] = None,
+#     skip_invalid: bool = False,
+# ) -> dict:
+#     """Run the full pipeline end to end and return the report dict."""
+#     data = load_data(input_path)
+#     warehouses = {k: tuple(v) for k, v in data["warehouses"].items()}
+#     agents = {k: tuple(v) for k, v in data["agents"].items()}
+#     packages = data["packages"]
+
+#     rng = random.Random(seed) if seed is not None else random.Random()
+
+#     if new_agent:
+#         # Format: "AGENT_ID:x,y:join_after_index"
+#         agent_id, coords, join_idx = new_agent.split(":")
+#         x, y = (float(v) for v in coords.split(","))
+#         sim_results = run_with_midday_agent(
+#             warehouses, agents, packages,
+#             new_agent_id=agent_id,
+#             new_agent_pos=(x, y),
+#             join_after_package_index=int(join_idx),
+#             delay_probability=delay_probability,
+#             max_delay_minutes=max_delay_minutes,
+#             rng=rng,
+#         )
+#     else:
+#         assignments = assign_packages(warehouses, agents, packages)
+#         sim_results = simulate_deliveries(
+#             warehouses, agents, assignments,
+#             delay_probability=delay_probability,
+#             max_delay_minutes=max_delay_minutes,
+#             rng=rng,
+#         )
+
+#     report = generate_report(sim_results, total_package_count=len(packages))
+#     save_report(report, output_path)
+
+#     if export_csv:
+#         export_top_performer_csv(report, export_csv)
+
+#     if show_ascii:
+#         print(visualize_routes_ascii(warehouses, sim_results))
+#         print()
+
+#     return report
+
+
+# --------new accepted code
+
 def run(
     input_path: str,
     output_path: str = "report.json",
@@ -383,8 +588,17 @@ def run(
     new_agent: Optional[str] = None,
     export_csv: Optional[str] = None,
     seed: Optional[int] = None,
+    skip_invalid: bool = False,
 ) -> dict:
-    """Run the full pipeline end to end and return the report dict."""
+    """Run the full pipeline end to end and return the report dict.
+
+    If a package is malformed or references a warehouse that doesn't
+    exist: by default (`skip_invalid=False`) this fails fast with a
+    clear `InvalidPackageError` (no raw traceback) naming the bad
+    package. Pass `skip_invalid=True` to instead skip such packages,
+    log a warning for each, and note them in the report's
+    `skipped_packages` list.
+    """
     data = load_data(input_path)
     warehouses = {k: tuple(v) for k, v in data["warehouses"].items()}
     agents = {k: tuple(v) for k, v in data["agents"].items()}
@@ -392,29 +606,38 @@ def run(
 
     rng = random.Random(seed) if seed is not None else random.Random()
 
-    if new_agent:
-        # Format: "AGENT_ID:x,y:join_after_index"
-        agent_id, coords, join_idx = new_agent.split(":")
-        x, y = (float(v) for v in coords.split(","))
-        sim_results = run_with_midday_agent(
-            warehouses, agents, packages,
-            new_agent_id=agent_id,
-            new_agent_pos=(x, y),
-            join_after_package_index=int(join_idx),
-            delay_probability=delay_probability,
-            max_delay_minutes=max_delay_minutes,
-            rng=rng,
-        )
-    else:
-        assignments = assign_packages(warehouses, agents, packages)
-        sim_results = simulate_deliveries(
-            warehouses, agents, assignments,
-            delay_probability=delay_probability,
-            max_delay_minutes=max_delay_minutes,
-            rng=rng,
+    try:
+        if new_agent:
+            # Format: "AGENT_ID:x,y:join_after_index"
+            agent_id, coords, join_idx = new_agent.split(":")
+            x, y = (float(v) for v in coords.split(","))
+            sim_results, skipped = run_with_midday_agent(
+                warehouses, agents, packages,
+                new_agent_id=agent_id,
+                new_agent_pos=(x, y),
+                join_after_package_index=int(join_idx),
+                delay_probability=delay_probability,
+                max_delay_minutes=max_delay_minutes,
+                rng=rng,
+                skip_invalid=skip_invalid,
+            )
+        else:
+            assignments, skipped = assign_packages(
+                warehouses, agents, packages, skip_invalid=skip_invalid
+            )
+            sim_results = simulate_deliveries(
+                warehouses, agents, assignments,
+                delay_probability=delay_probability,
+                max_delay_minutes=max_delay_minutes,
+                rng=rng,
+            )
+    except InvalidPackageError as exc:
+        raise SystemExit(
+            f"Invalid input -- {exc}\n"
+            f"(Pass --skip-invalid to skip bad packages instead of stopping.)"
         )
 
-    report = generate_report(sim_results, total_package_count=len(packages))
+    report = generate_report(sim_results, total_package_count=len(packages), skipped_packages=skipped)
     save_report(report, output_path)
 
     if export_csv:
@@ -441,6 +664,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--export-csv", default=None, help="Path to export the top performer as CSV")
     parser.add_argument("--seed", type=int, default=None, help="Random seed, for reproducible delay simulation")
+    
+    parser.add_argument(
+        "--skip-invalid", action="store_true",
+        help="Skip packages with missing fields or an unknown warehouse instead of stopping",
+    )
+    
     return parser
 
 
@@ -455,6 +684,7 @@ def main() -> None:
         new_agent=args.new_agent,
         export_csv=args.export_csv,
         seed=args.seed,
+        skip_invalid=args.skip_invalid,
     )
     print(json.dumps(report, indent=2))
     print(f"\nReport saved to {args.output}")
